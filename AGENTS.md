@@ -34,6 +34,14 @@ GitHub Actions is disabled in this repository's settings so the central workflow
 do not self-trigger here. These files are consumed by OTHER repos via enterprise
 rulesets; they are not meant to run against this repo.
 
+## Commit conventions
+
+- Commit as the repo owner (Mark Matyas). Use a `Signed-off-by:` trailer
+  (`git commit --signoff`).
+- Credit AI assistance with an `Assisted-by: <tool>:<model>` trailer, matching
+  existing history.
+- Do **not** add a `Co-Authored-By: Claude` trailer.
+
 ## Workflow directory / ruleset constraints
 
 - "Require workflows to pass" rulesets support events **`pull_request`,
@@ -63,7 +71,8 @@ No-op for repos without a queue. `merge_group` is included in `zizmor-scan.yml`.
   checkout of this central repo is always needed to obtain the policy.
 - `ZIZMOR_CONFIG_REPO = qualcomm/qcom-enterprise-workflows` (this repo is the
   canonical policy source).
-- Open placeholder: `ZIZMOR_CONFIG_REF = REPLACE_WITH_PINNED_COMMIT_SHA`.
+- `ZIZMOR_CONFIG_REF` is pinned to an immutable commit SHA of this repo; bump it
+  via PR whenever the policy changes.
 - Consuming repos' `GITHUB_TOKEN` must be able to read this repo (public, so reads
   succeed).
 - The policy lists **only deviations** from zizmor defaults.
@@ -101,7 +110,6 @@ on creation" option so a repo's first PR can seed the initial analysis.
 
 ## Open follow-ups
 
-- [ ] Replace `ZIZMOR_CONFIG_REF` placeholder with a pinned commit SHA.
 - [ ] Confirm consuming repos can read this repo's policy via `GITHUB_TOKEN`.
 - [ ] Later phase: hash-pin `unpinned-uses` (remove remap → restore blocking).
 - [ ] Later phase: tooling to govern protected-rule inline ignores.
