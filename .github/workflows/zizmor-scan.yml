@@ -1,41 +1,61 @@
-# Enterprise-wide GitHub Actions security scan (zizmor).
+# Enterprise-wide GitHub Actions security scan (zizmor) -- PR GATE.
 #
-# This workflow is intended to be distributed as an ORGANIZATION / ENTERPRISE
-# "required workflow" and enforced as a merge gate via an enterprise
-# Code Scanning merge-protection ruleset. See .github/zizmor.md for the full
-# operating model and rollout plan.
+# This is the RULESET workflow. It is distributed via an ORGANIZATION /
+# ENTERPRISE ruleset ("Require workflows to pass before merging") and enforced
+# with a SINGLE rule pointed at this file. The GATE IS THE JOB'S EXIT STATUS --
+# the job fails when zizmor finds an issue at or above ZIZMOR_FAIL_SEVERITY
+# (default: high). See .github/zizmor.md for the full operating model.
+#
+# SCOPE OF THIS FILE: PR-time enforcement only. The ruleset injects it ONLY on
+# pull_request / pull_request_target / merge_group -- never on push -- so this
+# file intentionally lists ONLY ruleset-triggered events. We use `pull_request`
+# (fork-safe, read-only token) and `merge_group`; we deliberately do NOT use
+# `pull_request_target` (our own policy flags it as a dangerous trigger).
+#
+# PUSH-TIME SCANNING lives ELSEWHERE: a zizmor job in the shared reusable
+# orchestrator (qualcomm/qcom-reusable-workflows), which caller repos already
+# trigger `on: push`. That path uploads SARIF (reviewable code-scanning alerts
+# for security managers) WITHOUT failing the push. A future GitHub App will
+# cover fork PRs and repos that don't call the reusable workflow. See zizmor.md.
+#
+# WHY NOT "Require code scanning results"? That rule fails closed when the tool
+# has no analysis for the repo, and FORK pull requests run with a read-only
+# token that cannot upload SARIF -- so it would block every fork PR forever.
+# Gating on job status instead works identically for fork and non-fork PRs
+# (the scan runs on `pull_request`, no secrets or write token required), which
+# is why we do NOT use the code-scanning-results rule. This mirrors Grafana's
+# at-scale zizmor rollout. See .github/zizmor.md.
 #
 # Design notes (see .github/zizmor.md for details):
 #   * The central, trusted zizmor config is checked out from a PINNED COMMIT SHA
 #     of the central repo and passed via `config:` (zizmor "global" discovery).
 #     This makes zizmor IGNORE any repo-local `zizmor.yml`, so a PR cannot weaken
 #     the policy by committing its own config.
-#   * Results are uploaded to GitHub Advanced Security (code scanning). The job
-#     itself does NOT fail on findings; blocking is handled by the enterprise
-#     ruleset, and dismissals are gated behind Security Managers.
-#   * When the run cannot upload to code scanning -- fork pull requests get a
-#     read-only token, or the repo has no GitHub Advanced Security / code
-#     scanning -- the workflow DEGRADES GRACEFULLY: zizmor runs in annotations
-#     mode and writes a job summary instead. Those runs are advisory (visibility
-#     only): they surface findings inline but do not upload SARIF and therefore
-#     do not arm the merge gate. Fork PRs are (re)enforced on the base repo
-#     after merge (the push baseline) and via maintainer review. See zizmor.md.
+#   * The GATING run (always) fails the job on findings >= ZIZMOR_FAIL_SEVERITY,
+#     rendering them as inline annotations. It needs no write token, so it runs
+#     the same on fork PRs, no-GHAS repos, and normal PRs -- this is the gate.
+#   * The SARIF run (best-effort, GHAS-only) uploads to code scanning for the
+#     Security tab and full-severity history -- INCLUDING on fork PRs, since
+#     GitHub's upload endpoint is special-cased to accept SARIF from the
+#     read-only fork token on `pull_request` runs. It is COSMETIC: it runs with
+#     continue-on-error and `--format=sarif` (exit 0 on findings), so it never
+#     affects the merge gate. On no-GHAS repos the upload is simply skipped.
+#   * The only escape hatch is an inline `# zizmor: ignore[rule]` comment, which
+#     is reviewable in the PR diff. We do NOT rely on code-scanning alert
+#     dismissals (which would need separate oversight to govern).
 name: GitHub Actions Security Scan (zizmor)
 
+# ONLY ruleset-injected events belong here (see header). The ruleset never runs
+# this workflow on push/schedule/workflow_dispatch, so listing those would only
+# create confusing no-op behavior in target repos. Push-time scanning is handled
+# by the reusable orchestrator, not this file.
 on:
   pull_request:
   # Required for repos that use a merge queue: a queued PR is checked against a
   # temporary "merge group" commit via a SEPARATE event. Without this trigger,
   # the required check is never reported for the merge group and the merge
-  # stalls. No-op for repos without a merge queue. NOTE: ruleset "required
-  # workflows" only support pull_request / pull_request_target / merge_group;
-  # the push trigger below only runs in THIS source repo, not in target repos.
+  # stalls. No-op for repos without a merge queue.
   merge_group:
-  push:
-    # Establish/refresh the code-scanning baseline on the default branches.
-    # Adjust if some repos use a different default branch name.
-    branches: [main, master]
-  workflow_dispatch:
 
 # Least privilege by default: no token scopes unless a job opts in.
 permissions: {}
@@ -59,6 +79,15 @@ env:
   ZIZMOR_CONFIG_REPO: qualcomm/qcom-enterprise-workflows
   ZIZMOR_CONFIG_REF: d53be295ed04539ff040577740c9233772e977fa
   ZIZMOR_CONFIG_PATH: .github/zizmor-enterprise-policy.yml
+
+  # --- Blocking threshold -----------------------------------------------------
+  # The job fails (blocking the merge via the "require workflows to pass" rule)
+  # when zizmor's HIGHEST finding is at or above this severity. Because the
+  # policy remaps our footgun audits to `high`, `high` == "block on footguns".
+  # Rollout lever: set to `never` to run advisory-only (scan + annotate, never
+  # block) while onboarding a fleet, then ratchet down high -> medium -> low.
+  # Accepted values: never | informational | low | medium | high.
+  ZIZMOR_FAIL_SEVERITY: high
 
 jobs:
   zizmor:
@@ -100,61 +129,73 @@ jobs:
           fi
           echo "config=${cfg}" >> "$GITHUB_OUTPUT"
 
-      # Decide whether we can upload to code scanning (GHAS) or must fall back
-      # to annotations. Two cases force the fallback:
-      #   1. Fork pull requests run with a READ-ONLY GITHUB_TOKEN, so the
-      #      security-events:write scope is downgraded and the SARIF upload
-      #      would fail with a permissions error.
-      #   2. The repository has no GitHub Advanced Security / code scanning
-      #      available (common for private repos without a GHAS license), so the
-      #      upload endpoint rejects the request.
-      - name: Determine reporting mode (code scanning vs annotations)
+      # Decide whether the best-effort SARIF upload can run, and compute the
+      # gate's severity filter. The SARIF upload is COSMETIC (Security tab); it
+      # is skipped only when the repository has no GitHub Advanced Security /
+      # code scanning available (common for private repos without a GHAS
+      # license), so the upload endpoint rejects the request. The GATE below
+      # always runs regardless.
+      #
+      # NOTE: fork pull requests are deliberately NOT skipped here. Although a
+      # fork PR runs with a read-only GITHUB_TOKEN, GitHub's code-scanning upload
+      # endpoint is SPECIAL-CASED to accept SARIF for `pull_request` runs (the
+      # same server-side path codeql-action/upload-sarif and semgrep rely on) --
+      # verified empirically with an external fork from a non-member account. So
+      # fork PRs DO populate the Security tab when GHAS is enabled; only the
+      # no-GHAS case falls back to annotations-only.
+      - name: Determine reporting mode and gate threshold
         id: mode
         env:
           GH_TOKEN: ${{ github.token }}
-          EVENT_NAME: ${{ github.event_name }}
-          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
           BASE_REPO: ${{ github.repository }}
+          FAIL_SEVERITY: ${{ env.ZIZMOR_FAIL_SEVERITY }}
         run: |
           set -euo pipefail
 
           ghas=true
           reason=""
 
-          # Case 1: fork pull request -> read-only token.
-          if [ "${EVENT_NAME}" = "pull_request" ] && [ "${HEAD_REPO}" != "${BASE_REPO}" ]; then
+          # Code scanning / Advanced Security availability probe. A clear
+          # "Advanced Security must be enabled" style error means GHAS is off ->
+          # skip the upload and rely on annotations. Any other error (e.g. a 404
+          # because no analysis exists yet, or a fork-PR permission quirk on the
+          # probe itself) is treated as available: worst case we still ATTEMPT
+          # the upload, which is the behavior we want.
+          if err="$(gh api "repos/${BASE_REPO}/code-scanning/alerts?per_page=1" 2>&1 >/dev/null)"; then
+            : # HTTP 200 -> code scanning is available
+          elif printf '%s' "${err}" | grep -qiE 'advanced security|code scanning is not enabled|must be enabled'; then
             ghas=false
-            reason="Pull request from a fork (${HEAD_REPO:-unknown}); fork PRs run with a read-only token and cannot upload to code scanning."
+            reason="GitHub Advanced Security / code scanning is not enabled for ${BASE_REPO}. The scan still runs and still blocks on findings via the job status."
           fi
 
-          # Case 2: code scanning / Advanced Security not available for this repo.
-          # Probe the alerts endpoint. A clear "Advanced Security must be enabled"
-          # style error means GHAS is off -> fall back. Any other error (e.g. a
-          # 404 because no analysis exists yet) is treated as available: the
-          # baseline simply hasn't been created, which the SARIF upload fixes.
-          if [ "${ghas}" = "true" ]; then
-            if err="$(gh api "repos/${BASE_REPO}/code-scanning/alerts?per_page=1" 2>&1 >/dev/null)"; then
-              : # HTTP 200 -> code scanning is available
-            elif printf '%s' "${err}" | grep -qiE 'advanced security|code scanning is not enabled|must be enabled'; then
-              ghas=false
-              reason="GitHub Advanced Security / code scanning is not enabled for ${BASE_REPO}."
-            fi
+          # The gate reports (and fails on) findings at/above FAIL_SEVERITY.
+          # zizmor's --min-severity has no "never", so in advisory mode we show
+          # everything (informational+) and let continue-on-error keep it green.
+          if [ "${FAIL_SEVERITY}" = "never" ]; then
+            gate_min_severity="informational"
+          else
+            gate_min_severity="${FAIL_SEVERITY}"
           fi
 
           echo "ghas=${ghas}" >> "${GITHUB_OUTPUT}"
           echo "reason=${reason}" >> "${GITHUB_OUTPUT}"
+          echo "gate_min_severity=${gate_min_severity}" >> "${GITHUB_OUTPUT}"
 
           if [ "${ghas}" = "true" ]; then
-            echo "::notice::zizmor results will be uploaded to GitHub code scanning."
+            echo "::notice::zizmor results will also be uploaded to GitHub code scanning."
           else
-            echo "::notice::Code scanning unavailable -- falling back to annotations. ${reason}"
+            echo "::notice::Code scanning upload skipped (${reason}) -- gate still enforced via job status."
           fi
 
-      # Primary path: upload SARIF to code scanning. With --format=sarif zizmor
-      # does NOT emit findings exit codes, so the step stays green; the enterprise
-      # ruleset is what blocks the merge on open alerts.
-      - name: Run zizmor (code scanning)
+      # Best-effort, COSMETIC: upload SARIF to code scanning for the Security tab
+      # and full-severity history. With --format=sarif zizmor exits 0 on findings,
+      # and continue-on-error swallows any upload/permission error, so this step
+      # NEVER affects the merge gate. Runs on fork PRs too (GitHub's upload
+      # endpoint accepts SARIF from the read-only fork token on pull_request
+      # runs); skipped only on no-GHAS repos.
+      - name: Upload results to code scanning (best-effort)
         if: steps.mode.outputs.ghas == 'true'
+        continue-on-error: true
         uses: zizmorcore/zizmor-action@5f14fd08f7cf1cb1609c1e344975f152c7ee938d # v0.5.6
         with:
           # Passing an explicit config = zizmor "global discovery": any
@@ -164,49 +205,58 @@ jobs:
           online-audits: true
           persona: regular
 
-      # Fallback path: emit GitHub annotations instead of SARIF. Needs no special
-      # permissions, so it works on fork PRs and GHAS-less repos. This is advisory
-      # only (it cannot arm the merge gate), so continue-on-error keeps the run
-      # from going red on findings -- consistent with the code-scanning path,
-      # where blocking is delegated to the ruleset rather than the job status.
-      - name: Run zizmor (annotations fallback)
-        id: annotations
-        if: steps.mode.outputs.ghas != 'true'
-        continue-on-error: true
+      # THE GATE. Always runs -- no write token needed, so it behaves identically
+      # on fork PRs, no-GHAS repos, and normal PRs. Emits GitHub annotations and,
+      # crucially, PRESERVES zizmor's severity exit codes (11-14): the step (and
+      # thus the job) FAILS when the highest finding is >= ZIZMOR_FAIL_SEVERITY.
+      # --min-severity filters to that threshold so only blocking findings are
+      # reported here (full-severity findings live in the SARIF/Security tab).
+      # In advisory mode (ZIZMOR_FAIL_SEVERITY=never) continue-on-error keeps the
+      # job green while still surfacing findings.
+      - name: Scan and enforce (gate)
+        id: gate
+        continue-on-error: ${{ env.ZIZMOR_FAIL_SEVERITY == 'never' }}
         uses: zizmorcore/zizmor-action@5f14fd08f7cf1cb1609c1e344975f152c7ee938d # v0.5.6
         with:
           config: ${{ steps.policy.outputs.config }}
           advanced-security: false
           annotations: true
+          min-severity: ${{ steps.mode.outputs.gate_min_severity }}
           online-audits: true
           persona: regular
 
-      # Explain the degraded run in the job summary so contributors and
-      # maintainers understand why there is no Security-tab entry for this run.
-      - name: Summarize advisory (annotations) run
-        if: steps.mode.outputs.ghas != 'true'
+      # Job summary: explain how this run was gated and where to see findings.
+      - name: Summarize run
+        if: always()
         env:
+          GHAS: ${{ steps.mode.outputs.ghas }}
           REASON: ${{ steps.mode.outputs.reason }}
+          FAIL_SEVERITY: ${{ env.ZIZMOR_FAIL_SEVERITY }}
+          GATE_OUTCOME: ${{ steps.gate.outcome }}
           CONFIG_REPO: ${{ env.ZIZMOR_CONFIG_REPO }}
         run: |
           set -euo pipefail
           {
-            echo "## Zizmor security scan — advisory mode"
+            echo "## Zizmor GitHub Actions security scan"
             echo
-            echo "Results were **not** uploaded to GitHub code scanning for this run."
+            if [ "${FAIL_SEVERITY}" = "never" ]; then
+              echo "**Mode:** advisory (ZIZMOR_FAIL_SEVERITY=never) — findings are surfaced but do **not** block this PR."
+            else
+              echo "**Gate:** this PR is blocked when zizmor finds an issue at or above **${FAIL_SEVERITY}** severity (gate outcome: \`${GATE_OUTCOME:-unknown}\`)."
+            fi
             echo
-            echo "**Reason:** ${REASON:-Code scanning was unavailable for this run.}"
+            if [ "${GHAS}" = "true" ]; then
+              echo "- Full results (all severities) were uploaded to **Security → Code scanning**."
+              echo "- The gate step additionally renders blocking findings as inline annotations."
+            else
+              echo "- Code scanning upload was skipped for this run. **Reason:** ${REASON:-unavailable}."
+              echo "- Findings are shown as **inline annotations** on the gate step (GitHub renders at most 10 per step; the step log has the full list)."
+            fi
             echo
-            echo "### What this means"
+            echo "### Fixing a finding"
             echo
-            echo "- Findings (if any) are shown as **inline annotations** on this check run."
-            echo "- This run is **advisory only**: it does not block this pull request via the code-scanning merge gate."
-            echo "- Enforcement still applies on the base repository after merge (the push baseline) and through maintainer review."
-            echo
-            echo "### Where to see findings"
-            echo
-            echo "- See the annotations on this check, or the **Run zizmor (annotations fallback)** step log for the complete list."
-            echo "- GitHub renders at most **10 annotations per step**; any additional findings appear only in the step log."
+            echo "- Apply the recommended remediation (see <https://docs.zizmor.sh/audits/>), or"
+            echo "- If it is a verified false positive / accepted risk, add an inline \`# zizmor: ignore[rule-name]\` comment on the offending line. This is the supported escape hatch and is reviewed in the PR diff."
             echo
             echo "See \`.github/zizmor.md\` in the central policy repo (\`${CONFIG_REPO}\`) for the full operating model."
           } >> "${GITHUB_STEP_SUMMARY}"
