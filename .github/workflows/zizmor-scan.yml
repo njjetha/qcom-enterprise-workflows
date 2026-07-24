@@ -77,7 +77,7 @@ env:
   # (or be tampered with) without an auditable, reviewed commit. Bump the SHA
   # via PR whenever the central config changes (see .github/zizmor.md > For maintainers).
   ZIZMOR_CONFIG_REPO: qualcomm/qcom-enterprise-workflows
-  ZIZMOR_CONFIG_REF: d53be295ed04539ff040577740c9233772e977fa
+  ZIZMOR_CONFIG_REF: 578114c8bb53926f0ef6950ea23eb0bd52a2ab37
   ZIZMOR_CONFIG_PATH: .github/zizmor-enterprise-policy.yml
 
   # --- Blocking threshold -----------------------------------------------------
