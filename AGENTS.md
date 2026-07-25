@@ -36,7 +36,7 @@ rulesets; they are not meant to run against this repo.
 
 ## Commit conventions
 
-- Commit as the repo owner (Mark Matyas). Use a `Signed-off-by:` trailer
+- Commit as the repo owner (Mark Matyas) or other human directing an agent to author contributions. Use a `Signed-off-by:` trailer
   (`git commit --signoff`).
 - Credit AI assistance with an `Assisted-by: <tool>:<model>` trailer, matching
   existing history.
@@ -126,66 +126,36 @@ Push-surface design (in `qcom-reusable-workflows`, planned):
   workflow input that any repo dev could flip off.
 - Coverage boundary: this surface only reaches repos that CALL the reusable
   workflow. Repos that don't get PR-gate coverage only (no push scan) until the
-  GitHub App lands.
-
-**Long-term:** a GitHub App replaces the push surface entirely (server-side scan on
-push webhooks with its own credentials), covering fork PRs and repos that don't
-call the reusable workflow — full control regardless of local workflow files.
+  **GitHub App** long-term replacement lands (server-side scan on push webhooks
+  with its own credentials — covers fork PRs and non-adopting repos regardless of
+  local workflow files).
 
 ## PR gate: ONE ruleset rule, gate on job status
 
-**Current approach (interim).** Enforce with a SINGLE ruleset rule:
-**"Require workflows to pass before merging"**, source repo
-`qualcomm/qcom-enterprise-workflows`, workflow `.github/workflows/zizmor-scan.yml`.
-The merge gate is the **job's exit status**: the `Scan and enforce (gate)` step
-runs zizmor in `--format=github` (annotations) mode, which PRESERVES zizmor's
-severity exit codes (11–14), so the job fails when the highest finding is at or
-above `ZIZMOR_FAIL_SEVERITY` (default `high`).
+Enforce with a SINGLE ruleset rule: **"Require workflows to pass before merging"**,
+source repo `qualcomm/qcom-enterprise-workflows`, workflow
+`.github/workflows/zizmor-scan.yml`. (Verified: the ruleset triggers the workflow
+with only this rule enabled.) The workflow has two steps:
 
-**Rollout without blocking teams: Evaluate mode.** Set the ruleset to **Evaluate**
-(not Active) during rollout. For the "require workflows to pass" rule specifically,
-Evaluate mode **still runs the workflow** — so PR annotations and job summaries are
-posted and developers see findings — but **nothing is blocked** (neither merges nor
-direct pushes). Flip to **Active** to start blocking. This is the interim that
-avoids the direct-push block impacting teams while findings are still surfaced.
-`zizmor-scan.yml` lists ONLY ruleset-injected events (`pull_request`, `merge_group`);
-it has no `push`/`workflow_dispatch` triggers (they would be no-ops in targets).
-Verified: the enterprise ruleset triggers the workflow with only "Require workflows
-to pass before merging" enabled.
+- **`Scan and enforce (gate)`** — the gate; always runs. `annotations:true`,
+  `advanced-security:false`, `min-severity:<fail-severity>`. Preserves zizmor's
+  severity exit codes, so the job fails when the highest finding is ≥
+  `ZIZMOR_FAIL_SEVERITY` (default `high`). Identical on fork PRs, no-GHAS repos,
+  and normal PRs — needs no analysis, GHAS license, or write token.
+- **`Upload results to code scanning (best-effort)`** — GHAS repos only (fork PRs
+  INCLUDED). `advanced-security:true` (SARIF, exits 0) + `continue-on-error:true`,
+  so it is purely COSMETIC (populates the Security tab, never affects the gate).
+  Skipped, not failed, on no-GHAS repos.
 
 **Why NOT "Require code scanning results".** That rule can only require a tool that
-has **already produced an analysis** for the repo — and nothing in the central
-ruleset produces one (a ruleset can only inject on PR events, never `on: push`). A
-repo with no local zizmor workflow, not yet reached by the push-scan surface, has
-no analysis, so the rule **fails closed** and blocks every PR (observed: *"Waiting
-for Code Scanning results — Code Scanning may not be configured for the target
-branch"*). Gating on job status needs no pre-existing analysis, no GHAS license,
-and no write token, so it works identically on every repo. This mirrors **Grafana's**
-at-scale zizmor rollout, which also gates on the job exit code. (Note: fork PRs
-CAN upload SARIF — GitHub's code-scanning endpoint accepts SARIF from the read-only
-fork token on `pull_request` runs, verified empirically — so the fork token is NOT
-a reason to avoid code-scanning results; the analysis-provenance problem above is.)
-
-**What each part does in `zizmor-scan.yml`:**
-
-- **`Scan and enforce (gate)`** — always runs; the gate. Uses
-  `advanced-security:false`, `annotations:true`, `min-severity:<fail-severity>`.
-  Fails the job on findings ≥ threshold. Identical behavior on fork PRs, no-GHAS
-  repos, and normal PRs.
-- **`Upload results to code scanning (best-effort)`** — GHAS-enabled repos only
-  (fork PRs INCLUDED). Uses `advanced-security:true` (SARIF, exits 0 on findings)
-  with `continue-on-error:true`, so it is purely COSMETIC: populates the Security
-  tab / full-severity history and can NEVER affect the gate. Skipped (not failed)
-  on no-GHAS repos.
-- **`ZIZMOR_FAIL_SEVERITY`** — rollout lever. `never` = advisory (scan + annotate,
-  never block); ratchet `high → medium → low` to tighten. Onboard new fleets at
-  `never` first.
-
-**Long-term direction:** a GitHub App + backend service to scan on push webhooks
-with its own credentials and govern dismissals, covering repos that don't call the
-reusable workflow. Once analysis is guaranteed for every repo, "require code
-scanning results" becomes viable as the gate. The single-rule/job-status model
-above is the interim bridge until that exists.
+has **already produced an analysis** for the repo — and nothing central produces
+one (a ruleset injects only on PR events, never `on: push`). A repo not yet reached
+by the push surface has no analysis, so the rule **fails closed** and blocks every
+PR (*"Waiting for Code Scanning results…"*). Job-status gating has no such
+dependency. This mirrors **Grafana's** at-scale rollout. Note: this is NOT a
+fork-token problem — fork PRs CAN upload SARIF (GitHub's endpoint accepts the
+read-only fork token on `pull_request` runs, verified empirically). The blocker is
+analysis provenance, which only the push surface / GitHub App resolves.
 
 ## Exceptions / governance direction
 

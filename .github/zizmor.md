@@ -16,22 +16,14 @@ inline ignore). See *For maintainers* for the ruleset details.
 - A **GitHub Actions Security Scan (zizmor)** check appears on PRs automatically.
 - If there are **high-severity** findings, the check **fails** and blocks the
   merge. Lower-severity findings are advisory (surfaced, non-blocking).
-- Findings appear as **inline annotations** on the check. On repositories with
-  GitHub Advanced Security, full results (all severities) are also uploaded to the
-  **Security → Code scanning** tab.
-- The gate works the same way on **pull requests from forks** — the scan runs and
-  blocks on high-severity findings. On GHAS-enabled repos, fork PRs also populate
-  the Security tab: GitHub's code-scanning upload endpoint accepts SARIF from a
-  fork PR's read-only token on `pull_request` runs, so no write token is required.
-
-### Where findings show up
-
-The check always renders blocking findings as inline annotations (GitHub shows at
-most 10 per step; the step log has the full list). On repos with code scanning
-available, all findings (all severities) are additionally uploaded to the Security
-tab for history and lower-severity visibility — this works on fork PRs too. Only
-repos without code scanning fall back to annotations-only. The run's job summary
-explains what happened for that specific run.
+- Findings always appear as **inline annotations** on the check (GitHub shows at
+  most 10 per step; the step log has the full list). On repos with GitHub Advanced
+  Security, all findings (all severities) are *also* uploaded to the **Security →
+  Code scanning** tab; repos without it get annotations only. The run's job summary
+  explains what happened for that run.
+- This all works the same on **pull requests from forks**, Security-tab upload
+  included: GitHub's code-scanning endpoint accepts SARIF from a fork PR's
+  read-only token on `pull_request` runs, so no write token is required.
 
 ## Fixing a finding
 
