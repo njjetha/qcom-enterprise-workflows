@@ -32,6 +32,9 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Install PyYAML
+        run: python3 -m pip install --quiet PyYAML
+
       - name: Read org list
         id: orgs
         run: |

@@ -55,8 +55,16 @@ def load_private_key() -> str:
     """
     raw = os.environ["BASE64_PRIVATE_PEM_KEY"].strip()
     if "-----BEGIN" in raw:
-        return raw
-    return base64.b64decode(raw).decode("utf-8")
+        pem = raw
+    else:
+        try:
+            pem = base64.b64decode(raw).decode("utf-8")
+        except Exception as exc:
+            raise ValueError(f"Failed to base64-decode BASE64_PRIVATE_PEM_KEY: {exc}") from exc
+
+    if "-----BEGIN" not in pem or "-----END" not in pem:
+        raise ValueError("BASE64_PRIVATE_PEM_KEY is not a valid PEM (missing BEGIN/END markers)")
+    return pem
 
 
 def build_integration(pem: str, app_id: int) -> GithubIntegration:
@@ -67,11 +75,7 @@ def installations_by_org(integration: GithubIntegration) -> dict:
     return {inst.account.login: inst.id for inst in integration.get_installations()}
 
 
-def installation_token(integration: GithubIntegration, installation_id: int) -> str:
-    return integration.get_access_token(installation_id).token
-
-
-def scoped_upload_token(integration: GithubIntegration, installation_id: int) -> str:
+def org_token(integration: GithubIntegration, installation_id: int) -> str:
     return integration.get_access_token(
         installation_id,
         permissions={
@@ -92,11 +96,24 @@ def list_public_repos(gh: Github, org: str) -> list[dict]:
 
 
 def scan_repo(org: str, repo: str, branch: str, token: str, workdir: Path) -> Path | None:
-    clone_url = f"https://x-access-token:{token}@github.com/{org}/{repo}.git"
-    subprocess.run(
-        ["git", "clone", "--depth", "1", "--branch", branch, clone_url, str(workdir)],
-        check=True, capture_output=True,
-    )
+    clone_url = f"https://x-access-token@github.com/{org}/{repo}.git"
+    askpass = workdir.parent / "git-askpass.sh"
+    askpass.write_text('#!/bin/sh\nexec echo "$GIT_TOKEN"\n')
+    askpass.chmod(0o700)
+    env = {
+        **os.environ,
+        "GIT_ASKPASS": str(askpass),
+        "GIT_TOKEN": token,
+        "GIT_TERMINAL_PROMPT": "0",
+    }
+    try:
+        subprocess.run(
+            ["git", "clone", "--depth", "1", "--branch", branch, clone_url, str(workdir)],
+            check=True, capture_output=True, text=True, env=env,
+        )
+    except subprocess.CalledProcessError as exc:
+        print(f"::error::git clone failed for {org}/{repo} (exit {exc.returncode}): {(exc.stderr or '').strip()}")
+        return None
     sarif = workdir.parent / f"{repo}.sarif"
     proc = subprocess.run(
         ["semgrep", "scan", "--sarif", "--output", str(sarif), *os.getenv("SEMGREP_CLI_OPTIONS", "").split()],
@@ -162,8 +179,12 @@ def scan_org(integration: GithubIntegration, installations: dict, org: str) -> i
         return 1
 
     inst = installations[org]
-    org_gh = Github(auth=Auth.Token(installation_token(integration, inst)))
-    repos = list_public_repos(org_gh, org)
+    # One token per org (valid ~1h) reused for listing, cloning, and uploading
+    # every repo -- avoids a token-mint API call per repository.
+    token = org_token(integration, inst)
+    gh = Github(auth=Auth.Token(token))
+
+    repos = list_public_repos(gh, org)
     print(f"::notice::{org}: {len(repos)} repositories to scan")
     if len(repos) > MATRIX_LIMIT:
         print(f"::warning::{org} has {len(repos)} repos (>{MATRIX_LIMIT}); scanning all anyway")
@@ -172,13 +193,11 @@ def scan_org(integration: GithubIntegration, installations: dict, org: str) -> i
     for repo in repos:
         name, branch = repo["name"], repo["default_branch"]
         try:
-            token = scoped_upload_token(integration, inst)
-            repo_gh = Github(auth=Auth.Token(token))
             with tempfile.TemporaryDirectory() as tmp:
                 workdir = Path(tmp) / name
                 sarif = scan_repo(org, name, branch, token, workdir)
                 if sarif:
-                    upload_sarif(repo_gh, org, name, branch, sarif, workdir)
+                    upload_sarif(gh, org, name, branch, sarif, workdir)
                 else:
                     print(f"::warning::{org}/{name}: no SARIF produced")
         except Exception as exc:  # keep scanning the rest of the fleet
@@ -188,7 +207,18 @@ def scan_org(integration: GithubIntegration, installations: dict, org: str) -> i
 
 
 def main() -> int:
-    app_id = int(os.environ["GITHUB_APP_ID"])
+    # Fail fast with a clear message if required secrets are missing, rather
+    # than surfacing an opaque KeyError deep in the App auth path.
+    missing = [v for v in ("GITHUB_APP_ID", "BASE64_PRIVATE_PEM_KEY") if not os.getenv(v)]
+    if missing:
+        print(f"::error::Missing required environment variables: {', '.join(missing)}", file=sys.stderr)
+        return 1
+
+    try:
+        app_id = int(os.environ["GITHUB_APP_ID"])
+    except ValueError:
+        print("::error::GITHUB_APP_ID must be an integer", file=sys.stderr)
+        return 1
     pem = load_private_key()
 
     single = os.getenv("SCAN_ORG") or (sys.argv[1] if len(sys.argv) > 1 else "")
