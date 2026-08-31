@@ -1,0 +1,66 @@
+# Weekly org-wide Semgrep scan.
+#
+# Scans every public repo in each org listed in
+# .github/semgrep-scan-organizations.yml
+# and uploads the SARIF into that repo's own Security -> Code scanning tab.
+# The `prepare` job turns the org list into a matrix so each org is scanned in
+# its own parallel `scan` job. All logic lives in
+# .github/scripts/semgrep_org_scan.py. Cross-repo auth uses an enterprise
+# GitHub App via PyGithub.
+name: Semgrep org-wide weekly scan
+
+on:
+  schedule:
+    - cron: '17 4 * * 1' # Monday ~04:17 UTC -- weekly
+  workflow_dispatch: {} # manual re-run / backfill
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    name: Build org matrix
+    runs-on: ubuntu-latest
+    outputs:
+      orgs: ${{ steps.orgs.outputs.orgs }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Read org list
+        id: orgs
+        run: |
+          orgs=$(python3 -c "import json, yaml; print(json.dumps(yaml.safe_load(open('.github/semgrep-scan-organizations.yml')).get('organizations') or []))")
+          echo "orgs=$orgs" >> "$GITHUB_OUTPUT"
+
+  scan:
+    name: Scan ${{ matrix.org }}
+    needs: prepare
+    runs-on: ubuntu-latest
+    container:
+      image: semgrep/semgrep:1.125.0
+    strategy:
+      fail-fast: false
+      matrix:
+        org: ${{ fromJson(needs.prepare.outputs.orgs) }}
+    env:
+      GITHUB_APP_ID: ${{ secrets.ORG_SCAN_APP_ID }}
+      BASE64_PRIVATE_PEM_KEY: ${{ secrets.ORG_SCAN_APP_PRIVATE_KEY }}
+      SEMGREP_CLI_OPTIONS: ${{ vars.SEMGREP_CLI_OPTIONS }}
+      SCAN_ORG: ${{ matrix.org }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Install dependencies
+        run: python3 -m pip install --quiet --upgrade --break-system-packages -r .github/scripts/requirements.txt
+
+      - name: Run scan
+        run: python3 .github/scripts/semgrep_org_scan.py

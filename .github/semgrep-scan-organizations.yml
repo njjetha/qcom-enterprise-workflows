@@ -1,0 +1,9 @@
+# Organizations covered by the weekly org-wide Semgrep scan
+# (.github/workflows/semgrep-org-scan.yml).
+#
+# Every PUBLIC, non-archived, non-fork, non-empty repository in each org listed
+# here is scanned weekly, and the SARIF results are uploaded to that
+# repository's own Security -> Code scanning tab.
+
+organizations:
+  - qualcomm-linux-stg

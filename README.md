@@ -15,6 +15,7 @@ there is nothing to copy into your own repository to adopt them.
 | --- | --- |
 | [`.github/workflows/zizmor-scan.yml`](.github/workflows/zizmor-scan.yml) | GitHub Actions security scan ([zizmor](https://github.com/zizmorcore/zizmor)), enforced as a Code Scanning merge gate. See [`.github/zizmor.md`](.github/zizmor.md). |
 | [`.github/workflows/qcom-preflight-checks-for-pkg.yml`](.github/workflows/qcom-preflight-checks-for-pkg.yml) | Preflight checks (license/copyright, dependency review, Semgrep, repolinter, commit email) for `pkg-*` repositories. |
+| [`.github/workflows/semgrep-org-scan.yml`](.github/workflows/semgrep-org-scan.yml) | Centralized weekly [Semgrep](https://semgrep.dev) scan of every public repository across the organizations in [`.github/semgrep-scan-organizations.yml`](.github/semgrep-scan-organizations.yml); uploads SARIF into each repo's own Code scanning tab. |
 
 Supporting files:
 
@@ -24,6 +25,36 @@ Supporting files:
   workflow, and this is a zizmor config, not a workflow.
 - [`.github/zizmor.md`](.github/zizmor.md) — what the zizmor gate does, how to fix
   findings, and how exceptions work.
+- [`.github/semgrep-scan-organizations.yml`](.github/semgrep-scan-organizations.yml) —
+  the list of organizations covered by the centralized Semgrep scan. It lives
+  outside `.github/workflows/` because it is configuration, not a workflow.
+- [`.github/scripts/semgrep_org_scan.py`](.github/scripts/semgrep_org_scan.py) —
+  the scan logic invoked by `semgrep-org-scan.yml` (repo discovery, Semgrep
+  execution, SARIF upload).
+
+## Centralized org-wide Semgrep scan
+
+[`semgrep-org-scan.yml`](.github/workflows/semgrep-org-scan.yml) runs Semgrep
+centrally, on a weekly schedule, across every eligible public repository in the
+organizations listed in
+[`.github/semgrep-scan-organizations.yml`](.github/semgrep-scan-organizations.yml).
+Results are uploaded as SARIF into each scanned repository's own **Security →
+Code scanning** tab.
+
+- **Scope:** every public, non-archived, non-fork, non-empty repository in each
+  configured org.
+- **Parallelism:** a `prepare` job turns the org list into a matrix, and each org
+  is scanned in its own parallel job (`fail-fast: false`), so one org failing
+  does not block the others.
+- **Auth:** cross-org access uses an enterprise GitHub App (same App ID / private
+  key installed on each org, with `contents: read` and `security-events: write`).
+  All GitHub API access goes through PyGithub.
+- **Clean repos:** a valid SARIF is uploaded even when there are no findings, so
+  previously-reported alerts that are now fixed are cleared.
+
+To add or remove an org, edit
+[`.github/semgrep-scan-organizations.yml`](.github/semgrep-scan-organizations.yml)
+and ensure the GitHub App is installed on that org.
 
 ## For repositories subject to these checks
 
